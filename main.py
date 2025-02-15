@@ -18,33 +18,46 @@ def get_bigquery_client():
     return bigquery.Client()
 
 def upload_to_bigquery(dataset_name: str, table_name: str, roles: List[Role]):
-    """Upload data to BigQuery table"""
     client = get_bigquery_client()
     dataset_ref = client.dataset(dataset_name)
     table_ref = dataset_ref.table(table_name)
-    
-    # Define the schema
-    schema = [
-        bigquery.SchemaField("name", "STRING"),
-        bigquery.SchemaField("title", "STRING"),
-        bigquery.SchemaField("description", "STRING"),
-        bigquery.SchemaField("deleted", "BOOLEAN"),
-        bigquery.SchemaField("etag", "STRING"),
-        bigquery.SchemaField("included_permissions", "STRING", mode="REPEATED"),
-        bigquery.SchemaField("stage", "STRING")
-    ]
 
-    # Create or get table
-    table = bigquery.Table(table_ref, schema=schema)
-    try:
-        table = client.create_table(table)
-    except Exception:
-        table = client.get_table(table_ref)
+    # Convert roles to a list of dictionaries for easier query construction
+    rows_to_insert = [dict(role) for role in roles]
 
-    # Insert data
-    errors = client.insert_rows(table, roles)
-    if errors:
-        raise Exception(f"Error inserting rows: {errors}")
+    # Construct the MERGE query
+    query = f"""
+    MERGE `{dataset_name}.{table_name}` T
+    USING UNNEST(@rows_to_insert) S
+    ON T.name = S.name
+    WHEN MATCHED THEN UPDATE SET
+        T.title = S.title,
+        T.description = S.description,
+        T.deleted = S.deleted,
+        T.etag = S.etag,
+        T.included_permissions = S.included_permissions,
+        T.stage = S.stage
+    WHEN NOT MATCHED THEN INSERT ROW
+    """
+
+    query_job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ArrayQueryParameter("rows_to_insert", bigquery.Struct([
+                bigquery.Field("name", "STRING"),
+                bigquery.Field("title", "STRING"),
+                bigquery.Field("description", "STRING"),
+                bigquery.Field("deleted", "BOOLEAN"),
+                bigquery.Field("etag", "STRING"),
+                bigquery.Field("included_permissions", "STRING", mode="REPEATED"),
+                bigquery.Field("stage", "STRING")
+            ]), rows_to_insert)
+        ]
+    )
+
+
+    query_job = client.query(query, job_config=query_job_config)
+    query_job.result()  # Wait for the query to complete
+    print(f"Merge operation completed.")
 
 def list_all_roles() -> List[Role]:
     """List all IAM roles"""
